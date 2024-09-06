@@ -121,7 +121,7 @@ df['Proportion'] = df['Success'] / df['Responses']
 
 
 # Select the smoothing method
-smoothing_method = st.selectbox("Select smoothing method", ["Bayesian", "EWM", "CUSUM"])
+smoothing_method = st.selectbox("Select smoothing method", ["Bayesian", "EWM"])
 
 # Initialize Kalman and CUSUM variables
 kalman_smoothed = None
