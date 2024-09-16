@@ -13,22 +13,26 @@ import plotly.graph_objects as go
 
 seed = st.slider("Random Seed (set for reproducibility)", 1, 1000, 24)
 # Function to generate a binomial time series with changing trend or sudden shock
-def generate_time_series(N, p_initial, days, change_type, shock_day=None,change=None):
+def generate_time_series(N, p_initial, date, change_type, change_date=None,change=None):
     np.random.seed(seed)  # For reproducibility
     p = p_initial
-    series = []
-    date = pd.date_range(start='2021-01-01', periods=days)
-    for day in range(days):
-        if change_type == "Trend Change" and day > days // 2:
-            p += change  # Slowly increase probability in the second half
-        elif change_type == "Sudden Shock" and day == shock_day:
-            p += change  # Sudden jump in probability at shock day
+    series = []    
+    index = 0
+    for day in date:
+
+        if change_date is not None:
+            if day.date() >= change_date:
+                if change_type == "Trend Change":
+                    p += change  # Slowly increase probability in the second half
+                elif (change_type == "Sudden Shock") and (day.date() == change_date):
+                    p = p_initial+change  # Sudden jump in probability at shock day
         
         p = max(min(p, 1), 0)  # Ensure probability remains between 0 and 1
         series.append(pd.DataFrame({'Success':np.random.binomial(N, p),
                                     'Responses':N,
                                     'True P':p,
-                                    'Date':date[day]},index=[day]))
+                                    'Date':pd.to_datetime(day)},index=[index]))
+        index += 1
     
     return pd.concat(series).sort_values('Date')
 
@@ -47,6 +51,16 @@ def aggregate_data(time_series, freq='D'):
 
     return time_series.set_index('Date')
 
+# Z-test for proportions (one-tailed test: H1: p1 > p2)
+def z_test_for_proportions_one_tailed(success1, n1, success2, n2):
+    p1 = success1 / n1
+    p2 = success2 / n2
+    pooled_p = (success1 + success2) / (n1 + n2)
+    std_err = np.sqrt(pooled_p * (1 - pooled_p) * (1/n1 + 1/n2))
+    z = (p1 - p2) / std_err
+    p_value = 1 - norm.cdf(z)  # One-tailed test for p1 > p2
+    return z, p_value
+    
 # Z-test for proportions
 def z_test_for_proportions(success1, n1, success2, n2):
     p1 = success1 / n1
@@ -92,16 +106,24 @@ N = st.number_input("Daily N", min_value=1, value=30)
 p_initial = st.slider("Initial probability (p)", 0.01, 1.0, 0.5)
 change_type = st.selectbox("Select the type of change", ["No Change", "Trend Change", "Sudden Shock"])
 
+#create the date range
+date = pd.date_range(start='2021-01-01', periods=days)
+
 shock_day = int(days/2)
 change= None
+change_date = None
 if change_type == "Sudden Shock":
-    shock_day = st.slider("Day of sudden shock", 1, days,int(days/2))
+    change_date = st.date_input("Date of sudden shock", value=date[len(date)//2], min_value=min(date),
+                                     max_value=date[len(date)//2])
     change = st.slider("Shock size(p)", 0.01, 1.0, 0.05)
 if change_type == "Trend Change":
-    change = st.slider("Trend Change Increment (per day after mid-point)", 0.0001, 0.01, 0.001, step=0.0001,format="%f")
+    change_date = st.date_input("Date of trend change", value=date[len(date)//2], min_value=min(date),
+                                     max_value=date[len(date)//2])
+    change = st.slider("Trend Change Increment (per day)", 0.0001, 0.01, 0.001, step=0.0001,format="%f")
+    
 
 # Generate the time series
-time_series = generate_time_series(N, p_initial, days, change_type, shock_day,change)
+time_series = generate_time_series(N, p_initial, date, change_type, change_date,change)
 
 freq = st.selectbox("Select data frequency", ["Daily", "Weekly", "Monthly"])
 
@@ -121,7 +143,7 @@ df['Proportion'] = df['Success'] / df['Responses']
 
 
 # Select the smoothing method
-smoothing_method = st.selectbox("Select smoothing method", ["Bayesian", "EWM"])
+smoothing_method = st.selectbox("Select smoothing method", ["EWM","Bayesian"])
 
 # Initialize Kalman and CUSUM variables
 kalman_smoothed = None
@@ -130,6 +152,11 @@ cusum_detected_changes = []
 days = len(df)
 # Apply the selected method
 if smoothing_method == "Bayesian":
+    with st.expander("Click here for a Bayesian"):
+        st.write("""Bayesian statistics allow for the inclusion of prior knowledge, in this instance we are using X 
+        days worth of previous data as our prior. This is under the assumption that most movement is sample error.
+        Including a prior will drag any daily values back to the recent mean. If we include too many days this will override
+        any sort of variance.""")
     # Configurable window size for updating the prior
     window_size = st.slider(f"Select window size for prior updates ({f})", 1, int(days/2), int(days/4))
 
@@ -138,8 +165,8 @@ if smoothing_method == "Bayesian":
     df['Beta_Post'] = 0
     
     # Set initial prior values
-    alpha_prior = st.number_input("Initial Alpha prior (a)", min_value=0.1, value=1.0)
-    beta_prior = st.number_input("Initial Beta prior (b)", min_value=0.1, value=1.0)
+    alpha_prior = 0#st.number_input("Initial Alpha prior (a)", min_value=0.1, value=1.0)
+    beta_prior = 0#st.number_input("Initial Beta prior (b)", min_value=0.1, value=1.0)
     
     # Perform Bayesian estimation with dynamic prior updating
     for i in range(len(df)):
@@ -166,12 +193,18 @@ if smoothing_method == "Bayesian":
 
 # Apply the selected method
 elif smoothing_method == "EWM":
+    with st.expander("Click here for a EWM explainer"):
+        st.write("""Exponentially Weighted Moving Average (EWMA) smoothing is a technique used 
+        to smooth time series data by giving more weight to recent observations while gradually
+        decreasing the weight for older observations. The key idea is that more recent data points
+        are more relevant for forecasting or trend analysis than older ones.""")
     period = st.slider(f"Weighting span ({f})", 1, int(days/2), 1)
     df = apply_ewm(df,period)
     df['Lower_CI'],df['Upper_CI'] = calculate_confidence_interval(df.EWMSmoothed,df.EWMResponses)
-elif smoothing_method == "CUSUM":
-    cusum_detected_changes = apply_cusum(df)
-    
+#elif smoothing_method == "CUSUM":
+#    cusum_detected_changes = apply_cusum(df)
+
+show_ci = st.checkbox('Show CI')
 # Plot the data
 fig = go.Figure()
 
@@ -201,15 +234,16 @@ if smoothing_method == "Bayesian":
         name='Posterior Mean (Bayesian)',
         line=dict(color='blue')
     ))
-    fig.add_trace(go.Scatter(
-        x=df.index.tolist() + df.index.tolist()[::-1], 
-        y=df['Upper_CI'].tolist() + df['Lower_CI'].tolist()[::-1], 
-        fill='toself', 
-        fillcolor='lightblue', 
-        line=dict(color='lightblue'),
-        name='95% Credible Interval',
-        opacity=0.5
-    ))
+    if show_ci:
+        fig.add_trace(go.Scatter(
+            x=df.index.tolist() + df.index.tolist()[::-1], 
+            y=df['Upper_CI'].tolist() + df['Lower_CI'].tolist()[::-1], 
+            fill='toself', 
+            fillcolor='lightblue', 
+            line=dict(color='lightblue'),
+            name='95% Credible Interval',
+            opacity=0.5
+        ))
 elif smoothing_method == "EWM":
     # Plot Kalman filter results
     fig.add_trace(go.Scatter(
@@ -219,15 +253,16 @@ elif smoothing_method == "EWM":
         name='Exponentially Weighted MA',
         line=dict(color='blue')
     ))
-    fig.add_trace(go.Scatter(
-        x=df.index.tolist() + df.index.tolist()[::-1], 
-        y=df['Upper_CI'].tolist() + df['Lower_CI'].tolist()[::-1], 
-        fill='toself', 
-        fillcolor='lightblue', 
-        line=dict(color='lightblue'),
-        name='95% Confidence Interval',
-        opacity=0.5
-    ))
+    if show_ci:
+        fig.add_trace(go.Scatter(
+            x=df.index.tolist() + df.index.tolist()[::-1], 
+            y=df['Upper_CI'].tolist() + df['Lower_CI'].tolist()[::-1], 
+            fill='toself', 
+            fillcolor='lightblue', 
+            line=dict(color='lightblue'),
+            name='95% Confidence Interval',
+            opacity=0.5
+        ))
 
 elif smoothing_method == "CUSUM":
     st.write(cusum_detected_changes)
@@ -236,8 +271,8 @@ elif smoothing_method == "CUSUM":
         if change<len(df):
             fig.add_vline(x=df.index[change-1], line=dict(color='red', dash='dash'), name='CUSUM Change Point',legend=True)
 
-if smoothing_method!='No change':
-    fig.add_vline(x=time_series.Date[shock_day-1], line=dict(color='black', dash='dash'), name='True Change Point')
+if change_type!='No Change':
+    fig.add_vline(x=change_date, line=dict(color='black', dash='dash'), name='True Change Point')
     #This invisible line will addthe vline to the legend
     fig.add_trace(go.Scatter(x=[None], y=[None], mode='lines', 
                          line=dict(color="black", dash="dash"), 
@@ -267,16 +302,8 @@ period2_end_date = st.date_input("End date of Period 2", value=df.index.max(), m
 period1_data = df.loc[period1_start_date:period1_end_date]
 period2_data = df.loc[period2_start_date:period2_end_date]
 
-#periods = len(df)
-#period1_start = st.slider("Start of Period 1", 0, periods-1, 0)
-#period1_end = st.slider("End of Period 1", period1_start, periods, periods//2)
 
-#period2_start = st.slider("Start of Period 2", 0, periods-1, periods//2)
-#period2_end = st.slider("End of Period 2", period2_start, periods, periods)
-
-# Extract data for the two periods
-#period1_data = df.iloc[period1_start:period1_end]
-#period2_data = df.iloc[period2_start:period2_end]
+true_diff = period2_data['True P'].mean() - period1_data['True P'].mean()
 
 # Calculate total successes and responses for each period
 success1 = period1_data['Success'].sum()
@@ -290,7 +317,7 @@ p1 = success1 / n1
 p2 = success2 / n2
 
 # Perform Z-test for proportions
-z_stat, p_value = z_test_for_proportions(success1, n1, success2, n2)
+z_stat, p_value = z_test_for_proportions_one_tailed(success2, n2, success1, n1)
 
 # Calculate confidence intervals for each proportion
 ci_low1, ci_high1 = calculate_confidence_interval(p1, n1)
@@ -306,20 +333,20 @@ desired_confidence = st.slider("Desired Confidence Level", 0.80, 0.99, 0.95)
 alpha = 1 - desired_confidence
 
 if p_value < alpha:
-    st.write(f"The difference between the two periods is statistically significant at confidence level {desired_confidence}.")
+    st.write(f"The difference between the two periods is statistically significant at confidence level {desired_confidence}. At this confidence level we would expect type II errors 5% of the time")
 else:
     st.write(f"The difference between the two periods is not statistically significant at confidence level {desired_confidence}.")
 
 
 # Power Calculation
 
-power = calculate_power(p1, p2, n1, n2, alpha)
+power = calculate_power(period1_data['True P'].mean(), period2_data['True P'].mean(), n1, n2, alpha)
 
 # Display power calculation result
 if change_type != 'No Change':
     st.write(f"Statistical Power of the test: {power:.4f}")
     with st.expander("Statistical Power"):
-        st.write(f"""With a difference of {(p2-p1):.3f} and sample sizes of {n1} and {n2} we would spot this
+        st.write(f"""With a true difference of {(true_diff):.3f} and sample sizes of {n1} and {n2} we would spot a significant
     difference {(power*100):.2f}% of the time, leading to Type I errors {((1-power)*100):.2f}% of the time""")
 
 # Explanation of Statistical Concepts with Expandable Text
